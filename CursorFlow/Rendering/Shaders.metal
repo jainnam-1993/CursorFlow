@@ -38,17 +38,17 @@ vertex VertexOut trailVertex(
     return out;
 }
 
-// Fragment shader for trail points - creates soft circular points
+// Fragment shader for trail points - creates circular points with adjustable sharpness
 fragment float4 trailFragment(
     VertexOut in [[stage_in]],
     float2 pointCoord [[point_coord]]
 ) {
-    // Create soft circular point
+    // Create circular point
     float2 center = pointCoord - 0.5;
     float dist = length(center) * 2.0;
 
-    // Soft edge falloff
-    float alpha = 1.0 - smoothstep(0.5, 1.0, dist);
+    // Sharper edge falloff (tighter smoothstep range)
+    float alpha = 1.0 - smoothstep(0.3, 0.8, dist);
 
     // Apply vertex alpha
     alpha *= in.color.a;

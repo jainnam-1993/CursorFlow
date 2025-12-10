@@ -29,7 +29,7 @@ class TrailRenderer: NSObject, MTKViewDelegate {
 
     struct Uniforms {
         var screenSize: SIMD2<Float> = SIMD2<Float>(1920, 1080)
-        var pointSize: Float = 20.0  // Increased from 8 for visibility testing
+        var pointSize: Float = 10.0  // Default point size
         var time: Float = 0
     }
 
@@ -215,16 +215,20 @@ class TrailRenderer: NSObject, MTKViewDelegate {
             var modifiedPoint = point
             let t = Float(index) / Float(max(1, trailPoints.count))
 
-            // Add random jitter for lightning effect
-            let jitterX = sin(time * 20 + Float(index) * 2.5) * (5.0 + Float(index) * 0.5)
-            let jitterY = cos(time * 25 + Float(index) * 3.0) * (5.0 + Float(index) * 0.5)
+            // Sharp electric jitter - quick random-like movement
+            let jitterScale = 3.0 + Float(index) * 0.3  // Smaller jitter
+            let jitterX = sin(time * 40 + Float(index) * 4.0) * jitterScale
+            let jitterY = cos(time * 45 + Float(index) * 5.0) * jitterScale
 
             modifiedPoint.position.x += jitterX
             modifiedPoint.position.y += jitterY
 
-            // White/blue electric glow
-            modifiedPoint.color = SIMD3<Float>(0.8 + sin(time * 30) * 0.2, 0.9, 1.0)
-            modifiedPoint.alpha = pow(1.0 - t, 1.2) * point.alpha
+            // Bright white core with blue tint - flickers
+            let flicker = 0.85 + sin(time * 60 + Float(index) * 2.0) * 0.15
+            modifiedPoint.color = SIMD3<Float>(flicker, flicker, 1.0)
+
+            // Sharp falloff - lightning fades quickly
+            modifiedPoint.alpha = pow(1.0 - t, 2.0) * point.alpha * flicker
 
             result.append(TrailVertex(point: modifiedPoint))
         }
