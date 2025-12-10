@@ -1,0 +1,39 @@
+name: CursorFlow
+options:
+  bundleIdPrefix: com.cursorflow
+  deploymentTarget:
+    macOS: "12.4"
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  MARKETING_VERSION: "1.0.0"
+  CURRENT_PROJECT_VERSION: "1"
+  DEVELOPMENT_TEAM: ""
+  CODE_SIGN_IDENTITY: "-"
+  CODE_SIGN_STYLE: Manual
+
+targets:
+  CursorFlow:
+    type: application
+    platform: macOS
+    sources:
+      - path: CursorFlow
+        excludes:
+          - "**/.DS_Store"
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.cursorflow.app
+      INFOPLIST_FILE: CursorFlow/Resources/Info.plist
+      CODE_SIGN_ENTITLEMENTS: CursorFlow/Supporting/CursorFlow.entitlements
+      SWIFT_VERSION: "5.9"
+      MACOSX_DEPLOYMENT_TARGET: "12.4"
+      PRODUCT_NAME: CursorFlow
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      LD_RUNPATH_SEARCH_PATHS:
+        - "$(inherited)"
+        - "@executable_path/../Frameworks"
+      ENABLE_HARDENED_RUNTIME: NO
+      COMBINE_HIDPI_IMAGES: YES
+    dependencies: []
+    preBuildScripts: []
+    postBuildScripts: []
