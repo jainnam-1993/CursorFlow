@@ -27,9 +27,9 @@ class MouseTracker {
                                       (1 << CGEventType.rightMouseDragged.rawValue) |
                                       (1 << CGEventType.otherMouseDragged.rawValue)
 
-        // Create event tap at HID level for global access (works even when not focused)
+        // Create event tap at session level for global access (works without root)
         eventTap = CGEvent.tapCreate(
-            tap: .cghidEventTap,  // HID level tap - global, works across all apps
+            tap: .cgSessionEventTap,  // Session level tap - global for user session, no root needed
             place: .headInsertEventTap,
             options: .listenOnly,
             eventsOfInterest: eventMask,
