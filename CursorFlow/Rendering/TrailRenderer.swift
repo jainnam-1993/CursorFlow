@@ -5,12 +5,17 @@ class TrailRenderer: NSObject, MTKViewDelegate {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private var pipelineState: MTLRenderPipelineState?
+    private var lightningPipelineState: MTLRenderPipelineState?
 
     // Trail data
     private var trailPoints: [TrailPoint] = []
     private var maxTrailLength = 128
     private var vertices: [TrailVertex] = []
     private var vertexBuffer: MTLBuffer?
+
+    // Lightning branch system
+    private var activeBranches: [LightningBranch] = []
+    private var branchCooldown: Float = 0
 
     // Uniforms
     private var uniforms = Uniforms()
@@ -83,11 +88,39 @@ class TrailRenderer: NSObject, MTKViewDelegate {
         } catch {
             print("Failed to create pipeline state: \(error)")
         }
+
+        // Setup lightning pipeline with additive blending for glow
+        setupLightningPipeline(library: library)
+    }
+
+    private func setupLightningPipeline(library: MTLLibrary) {
+        let vertexFunction = library.makeFunction(name: "trailLineVertex")
+        let fragmentFunction = library.makeFunction(name: "trailLineFragment")
+
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.vertexFunction = vertexFunction
+        pipelineDescriptor.fragmentFunction = fragmentFunction
+        pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+
+        // Additive blending for glow effect
+        pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
+        pipelineDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        pipelineDescriptor.colorAttachments[0].alphaBlendOperation = .add
+        pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .one  // Additive
+        pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .one
+
+        do {
+            lightningPipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+        } catch {
+            print("Failed to create lightning pipeline state: \(error)")
+        }
     }
 
     private func setupBuffers() {
-        // Pre-allocate vertex buffer (larger for lightning effect which adds extra points)
-        let bufferSize = maxTrailLength * 4 * MemoryLayout<TrailVertex>.stride
+        // Pre-allocate vertex buffer - lightning needs more (2 verts/point * 3 glow layers + branches)
+        let bufferSize = maxTrailLength * 16 * MemoryLayout<TrailVertex>.stride
         vertexBuffer = device.makeBuffer(length: bufferSize, options: .storageModeShared)
 
         // Uniform buffer
@@ -209,31 +242,256 @@ class TrailRenderer: NSObject, MTKViewDelegate {
     }
 
     private func generateLightningVertices() -> [TrailVertex] {
-        var result: [TrailVertex] = []
+        // Skip first few points to keep area near cursor clear
+        let skipPoints = 3
+        guard trailPoints.count >= skipPoints + 2 else { return [] }
 
-        for (index, point) in trailPoints.enumerated() {
-            var modifiedPoint = point
-            let t = Float(index) / Float(max(1, trailPoints.count))
+        let userColor = nsColorToSimd(trailColor)
 
-            // Sharp electric jitter - quick random-like movement
-            let jitterScale = 3.0 + Float(index) * 0.3  // Smaller jitter
-            let jitterX = sin(time * 40 + Float(index) * 4.0) * jitterScale
-            let jitterY = cos(time * 45 + Float(index) * 5.0) * jitterScale
+        // Only flame wisps - no base line
+        return buildFlameWisps(startIndex: skipPoints, userColor: userColor)
+    }
 
-            modifiedPoint.position.x += jitterX
-            modifiedPoint.position.y += jitterY
+    /// Build straight line following cursor path
+    private func buildStraightLine(startIndex: Int, userColor: SIMD3<Float>) -> [TrailVertex] {
+        var vertices: [TrailVertex] = []
+        let count = trailPoints.count - startIndex
 
-            // Bright white core with blue tint - flickers
-            let flicker = 0.85 + sin(time * 60 + Float(index) * 2.0) * 0.15
-            modifiedPoint.color = SIMD3<Float>(flicker, flicker, 1.0)
+        for i in startIndex..<trailPoints.count {
+            let pos = trailPoints[i].position
+            let t = Float(i - startIndex) / Float(max(1, count - 1))
 
-            // Sharp falloff - lightning fades quickly
-            modifiedPoint.alpha = pow(1.0 - t, 2.0) * point.alpha * flicker
+            // Calculate perpendicular
+            let perpendicular = calculatePerpendicular(at: i)
 
-            result.append(TrailVertex(point: modifiedPoint))
+            // Alpha fades along trail
+            let alpha = pow(1.0 - t, 1.5) * trailPoints[i].alpha
+
+            // Color: user color blended with warm orange/yellow
+            let flameCore = SIMD3<Float>(1.0, 0.7, 0.3)  // Orange-yellow
+            let mixed = userColor * 0.5 + flameCore * 0.5
+            let color = SIMD4<Float>(mixed.x, mixed.y, mixed.z, alpha)
+
+            // Width tapers
+            let width: Float = 4.0 * (1.0 - t * 0.5)
+            let halfWidth = width * 0.5
+
+            let leftPos = pos + perpendicular * halfWidth
+            let rightPos = pos - perpendicular * halfWidth
+
+            vertices.append(TrailVertex(position: leftPos, color: color))
+            vertices.append(TrailVertex(position: rightPos, color: color))
         }
 
-        return result
+        return vertices
+    }
+
+    /// Build flame wisps rising from the trail
+    private func buildFlameWisps(startIndex: Int, userColor: SIMD3<Float>) -> [TrailVertex] {
+        var vertices: [TrailVertex] = []
+
+        // Create wisps at intervals along the trail
+        let wispSpacing = 3
+        for i in stride(from: startIndex, to: trailPoints.count - 2, by: wispSpacing) {
+            let basePos = trailPoints[i].position
+            let t = Float(i - startIndex) / Float(max(1, trailPoints.count - startIndex - 1))
+
+            // Wisps rise upward (negative Y in screen coords)
+            let wispHeight: Float = 15.0 * (1.0 - t)  // Taller near cursor
+            let wispWidth: Float = 3.0 * (1.0 - t * 0.5)
+
+            // Animated horizontal sway
+            let sway = sin(time * 20 + Float(i) * 0.8) * 4.0 * (1.0 - t)
+
+            // Wisp base (at trail)
+            let baseAlpha = 0.8 * trailPoints[i].alpha * (1.0 - t)
+            let baseColor = SIMD4<Float>(1.0, 0.6, 0.2, baseAlpha)  // Orange
+
+            // Wisp tip (rising up)
+            let tipPos = SIMD2<Float>(basePos.x + sway, basePos.y - wispHeight)
+            let tipAlpha = 0.3 * trailPoints[i].alpha * (1.0 - t)
+            let tipColor = SIMD4<Float>(1.0, 0.9, 0.5, tipAlpha)  // Yellow-white
+
+            // Build wisp as thin triangle strip
+            let perpendicular = SIMD2<Float>(1, 0)  // Horizontal spread
+
+            // Base vertices
+            vertices.append(TrailVertex(position: basePos + perpendicular * wispWidth, color: baseColor))
+            vertices.append(TrailVertex(position: basePos - perpendicular * wispWidth, color: baseColor))
+
+            // Tip vertices (narrower)
+            vertices.append(TrailVertex(position: tipPos + perpendicular * (wispWidth * 0.3), color: tipColor))
+            vertices.append(TrailVertex(position: tipPos - perpendicular * (wispWidth * 0.3), color: tipColor))
+        }
+
+        return vertices
+    }
+
+    // MARK: - Lightning Helpers
+
+    /// Generate zigzag path using perpendicular displacement (like midpoint displacement)
+    private func generateZigzagPath(startIndex: Int = 0) -> [SIMD2<Float>] {
+        var displaced: [SIMD2<Float>] = []
+
+        for i in startIndex..<trailPoints.count {
+            var pos = trailPoints[i].position
+            let t = Float(i - startIndex) / Float(max(1, trailPoints.count - startIndex - 1))
+
+            // Calculate perpendicular direction to trail
+            let perpendicular = calculatePerpendicular(at: i)
+
+            // Zigzag: alternate direction with decreasing amplitude
+            let zigzagSign: Float = (i % 2 == 0) ? 1.0 : -1.0
+            let baseDisplacement: Float = 12.0 * (1.0 - t)  // Larger near cursor
+
+            // Add some randomness via sine waves at different frequencies
+            let variation = sin(Float(i) * 1.7 + time * 5) * 0.5 + 0.5
+            let zigzagAmount = zigzagSign * baseDisplacement * (0.5 + variation)
+
+            // High-frequency jitter for vibration effect
+            let jitterFreq: Float = 50.0
+            let jitterAmount: Float = 4.0 * (1.0 - t)
+            let jitter = sin(time * jitterFreq + Float(i) * 3.0) * jitterAmount
+
+            pos += perpendicular * (zigzagAmount + jitter)
+            displaced.append(pos)
+        }
+
+        return displaced
+    }
+
+    /// Calculate perpendicular vector at a point in the trail
+    private func calculatePerpendicular(at index: Int) -> SIMD2<Float> {
+        let count = trailPoints.count
+        guard count >= 2 else { return SIMD2<Float>(0, 1) }
+
+        let direction: SIMD2<Float>
+        if index == 0 {
+            direction = trailPoints[0].position - trailPoints[1].position
+        } else if index == count - 1 {
+            direction = trailPoints[index - 1].position - trailPoints[index].position
+        } else {
+            direction = trailPoints[index - 1].position - trailPoints[index + 1].position
+        }
+
+        let length = simd_length(direction)
+        guard length > 0.001 else { return SIMD2<Float>(0, 1) }
+
+        let normalized = direction / length
+        return SIMD2<Float>(-normalized.y, normalized.x)  // 90-degree rotation
+    }
+
+    /// Build triangle strip from point path with specified width and glow properties
+    private func buildTriangleStrip(points: [SIMD2<Float>], width: Float, baseAlpha: Float,
+                                    glowLayer: Int, userColor: SIMD3<Float>) -> [TrailVertex] {
+        guard points.count >= 2 else { return [] }
+
+        var vertices: [TrailVertex] = []
+
+        for i in 0..<points.count {
+            let pos = points[i]
+            let t = Float(i) / Float(max(1, points.count - 1))
+
+            // Calculate perpendicular at this point
+            let perpendicular: SIMD2<Float>
+            if i == 0 {
+                let dir = simd_normalize(points[1] - points[0])
+                perpendicular = SIMD2<Float>(-dir.y, dir.x)
+            } else if i == points.count - 1 {
+                let dir = simd_normalize(points[i] - points[i-1])
+                perpendicular = SIMD2<Float>(-dir.y, dir.x)
+            } else {
+                let dir = simd_normalize(points[i+1] - points[i-1])
+                perpendicular = SIMD2<Float>(-dir.y, dir.x)
+            }
+
+            // Alpha falloff along trail
+            let trailIndex = min(i + 8, trailPoints.count - 1)  // Account for skip offset
+            let alpha = baseAlpha * pow(1.0 - t, 1.8) * trailPoints[trailIndex].alpha
+
+            // Flicker effect
+            let flicker = 0.85 + sin(time * 60 + Float(i) * 2.0) * 0.15
+
+            // Color based on glow layer - blend user color with electric white/blue
+            let color: SIMD4<Float>
+            switch glowLayer {
+            case 0:  // Core - mostly white with hint of user color
+                let mixed = userColor * 0.3 + SIMD3<Float>(0.9, 0.95, 1.0) * 0.7
+                color = SIMD4<Float>(mixed.x * flicker, mixed.y * flicker, mixed.z, alpha)
+            case 1:  // Inner glow - user color tinted
+                let mixed = userColor * 0.6 + SIMD3<Float>(0.6, 0.8, 1.0) * 0.4
+                color = SIMD4<Float>(mixed.x * flicker, mixed.y * flicker, mixed.z, alpha)
+            default:  // Outer glow - faint user color
+                let mixed = userColor * 0.4 + SIMD3<Float>(0.3, 0.5, 1.0) * 0.6
+                color = SIMD4<Float>(mixed.x * flicker, mixed.y * flicker, mixed.z, alpha)
+            }
+
+            // Width tapers toward end
+            let halfWidth = width * 0.5 * (1.0 - t * 0.6)
+
+            let leftPos = pos + perpendicular * halfWidth
+            let rightPos = pos - perpendicular * halfWidth
+
+            vertices.append(TrailVertex(position: leftPos, color: color))
+            vertices.append(TrailVertex(position: rightPos, color: color))
+        }
+
+        return vertices
+    }
+
+    /// Update lightning branches - spawn new ones and decay existing
+    private func updateBranches(mainPath: [SIMD2<Float>]) {
+        // Decay cooldown
+        branchCooldown -= 1.0 / 60.0
+
+        // Spawn new branch randomly
+        if branchCooldown <= 0 && mainPath.count > 10 && Float.random(in: 0...1) < 0.12 {
+            let spawnIndex = Int.random(in: 3..<min(mainPath.count - 3, 25))
+            var branch = LightningBranch(startIndex: spawnIndex)
+
+            // Generate branch path
+            var branchPos = mainPath[spawnIndex]
+
+            // Get main trail direction and branch off at an angle
+            let mainDir: SIMD2<Float>
+            if spawnIndex > 0 && spawnIndex < mainPath.count - 1 {
+                mainDir = simd_normalize(mainPath[spawnIndex - 1] - mainPath[spawnIndex + 1])
+            } else {
+                mainDir = SIMD2<Float>(1, 0)
+            }
+
+            // Branch angle: 30-70 degrees off main direction
+            let angle = Float.random(in: 0.5...1.2) * (Float.random(in: 0...1) < 0.5 ? 1 : -1)
+            let branchDir = SIMD2<Float>(
+                mainDir.x * cos(angle) - mainDir.y * sin(angle),
+                mainDir.x * sin(angle) + mainDir.y * cos(angle)
+            )
+
+            branch.points.append(branchPos)
+            let branchLength = Int.random(in: 4...7)
+
+            for _ in 1...branchLength {
+                let segmentLength: Float = 10.0 + Float.random(in: -3...3)
+                let jitter = SIMD2<Float>(Float.random(in: -4...4), Float.random(in: -4...4))
+                branchPos += branchDir * segmentLength + jitter
+                branch.points.append(branchPos)
+            }
+
+            activeBranches.append(branch)
+            branchCooldown = Float.random(in: 0.08...0.25)
+        }
+
+        // Decay and remove old branches
+        activeBranches = activeBranches.compactMap { branch in
+            var b = branch
+            b.decay -= 0.04  // ~25 frames to fully decay
+            return b.decay > 0 ? b : nil
+        }
+
+        // Limit max branches
+        if activeBranches.count > 6 {
+            activeBranches.removeFirst()
+        }
     }
 
     private func generateRainbowVertices() -> [TrailVertex] {
@@ -347,10 +605,18 @@ class TrailRenderer: NSObject, MTKViewDelegate {
             return
         }
 
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-        encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
-        encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: vertices.count)
+        // Use different pipeline and primitive type for lightning
+        if trailEffect == .lightning, let lightningPipeline = lightningPipelineState {
+            encoder.setRenderPipelineState(lightningPipeline)
+            encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
+        } else {
+            encoder.setRenderPipelineState(pipelineState)
+            encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+            encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: vertices.count)
+        }
 
         encoder.endEncoding()
         commandBuffer.present(drawable)

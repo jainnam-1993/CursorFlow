@@ -23,4 +23,22 @@ struct TrailVertex {
         self.position = point.position
         self.color = SIMD4<Float>(point.color.x, point.color.y, point.color.z, point.alpha)
     }
+
+    init(position: SIMD2<Float>, color: SIMD4<Float>) {
+        self.position = position
+        self.color = color
+    }
+}
+
+// Lightning branch structure for electric arc forks
+struct LightningBranch {
+    var startIndex: Int              // Index in main trail where branch starts
+    var points: [SIMD2<Float>]       // Branch point positions
+    var decay: Float                 // Fade factor (1.0 → 0.0)
+
+    init(startIndex: Int) {
+        self.startIndex = startIndex
+        self.points = []
+        self.decay = 1.0
+    }
 }
