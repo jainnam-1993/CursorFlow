@@ -65,9 +65,12 @@ class OverlayWindow: NSWindow {
 
         metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         metalView.framebufferOnly = false
-        metalView.preferredFramesPerSecond = 60
+        metalView.preferredFramesPerSecond = 120  // Higher FPS for smoother trails
         metalView.isPaused = false
         metalView.enableSetNeedsDisplay = false
+
+        // Prevent pausing when app loses focus
+        metalView.presentsWithTransaction = false
 
         contentView = metalView
 

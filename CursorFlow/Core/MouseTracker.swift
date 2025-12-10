@@ -34,6 +34,13 @@ class MouseTracker {
             options: .listenOnly,
             eventsOfInterest: eventMask,
             callback: { proxy, type, event, refcon in
+                // Debug: Log every 100th event to confirm tap is working
+                struct Counter { static var count = 0 }
+                Counter.count += 1
+                if Counter.count % 100 == 1 {
+                    NSLog("[CursorFlow] Event callback fired #%d, type: %d", Counter.count, type.rawValue)
+                }
+
                 guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
 
                 let tracker = Unmanaged<MouseTracker>.fromOpaque(refcon).takeUnretainedValue()

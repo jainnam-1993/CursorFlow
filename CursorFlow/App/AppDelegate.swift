@@ -9,6 +9,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("[CursorFlow] App launched")
+
+        // Ensure app stays active for event processing even as accessory app
+        NSApp.setActivationPolicy(.accessory)
+
         checkAccessibilityPermission()
         loadSettings()
         setupOverlayWindow()
