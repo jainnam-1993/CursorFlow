@@ -18,7 +18,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupOverlayWindow()
         setupMouseTracking()
         setupStatusBar()
+
+        // Register for app activation notifications to keep rendering when in background
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidResignActive),
+            name: NSApplication.didResignActiveNotification,
+            object: nil
+        )
+
         NSLog("[CursorFlow] Setup complete")
+    }
+
+    @objc func applicationDidResignActive(_ notification: Notification) {
+        // Ensure Metal view keeps rendering when app loses focus
+        if let metalView = overlayWindow?.contentView as? MTKView {
+            metalView.isPaused = false
+            metalView.enableSetNeedsDisplay = false
+        }
+        // Re-enable event tap when losing focus
+        mouseTracker?.start()
+        NSLog("[CursorFlow] App resigned active - ensuring background operation")
     }
 
     private func checkAccessibilityPermission() {

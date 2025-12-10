@@ -5,49 +5,49 @@ class MouseTracker {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var checkTimer: Timer?
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
+    private var pollingTimer: Timer?
+    private var lastMouseLocation: NSPoint = .zero
 
     var onMouseMove: ((NSPoint) -> Void)?
 
     func start() {
-        // First check accessibility permission
-        if !AXIsProcessTrusted() {
-            NSLog("[CursorFlow] Accessibility not granted, requesting permission...")
-            requestAccessibilityPermission()
+        NSLog("[CursorFlow] Starting mouse tracking...")
 
-            // Retry periodically until permission is granted
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.retryStartIfNeeded()
-            }
-            return
+        // Try CGEvent tap first (requires accessibility)
+        if AXIsProcessTrusted() {
+            startEventTap()
+        } else {
+            NSLog("[CursorFlow] Accessibility not granted, using fallback tracking")
+            requestAccessibilityPermission()
         }
 
-        // Event mask - only mouse movement events (simpler, more reliable)
+        // Always start fallback monitors as backup
+        startFallbackTracking()
+    }
+
+    private func startEventTap() {
+        // Event mask - only mouse movement events
         let eventMask: CGEventMask = (1 << CGEventType.mouseMoved.rawValue) |
                                       (1 << CGEventType.leftMouseDragged.rawValue) |
                                       (1 << CGEventType.rightMouseDragged.rawValue) |
                                       (1 << CGEventType.otherMouseDragged.rawValue)
 
-        // Create event tap at session level for global access (works without root)
+        // Create event tap at session level for global access
         eventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,  // Session level tap - global for user session, no root needed
+            tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .listenOnly,
             eventsOfInterest: eventMask,
             callback: { proxy, type, event, refcon in
-                // Debug: Log every 100th event to confirm tap is working
-                struct Counter { static var count = 0 }
-                Counter.count += 1
-                if Counter.count % 100 == 1 {
-                    NSLog("[CursorFlow] Event callback fired #%d, type: %d", Counter.count, type.rawValue)
-                }
-
                 guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
 
                 let tracker = Unmanaged<MouseTracker>.fromOpaque(refcon).takeUnretainedValue()
 
                 // Handle tap disabled event - immediately re-enable
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    NSLog("[CursorFlow] Event tap disabled by system, re-enabling immediately")
+                    NSLog("[CursorFlow] Event tap disabled by system, re-enabling")
                     if let tap = tracker.eventTap {
                         CGEvent.tapEnable(tap: tap, enable: true)
                     }
@@ -55,11 +55,7 @@ class MouseTracker {
                 }
 
                 let location = event.location
-
-                // CGEvent location uses Quartz display coordinates (origin at top-left of primary display)
-                // Keep Y as-is since Metal shader also uses top-down coordinate system
                 DispatchQueue.main.async {
-                    // Pass CGEvent coordinates directly - shader handles the coordinate transform
                     let nsPoint = NSPoint(x: location.x, y: location.y)
                     tracker.onMouseMove?(nsPoint)
                 }
@@ -70,24 +66,75 @@ class MouseTracker {
         )
 
         guard let eventTap = eventTap else {
-            NSLog("[CursorFlow] Failed to create event tap. Check Accessibility permissions.")
-            requestAccessibilityPermission()
+            NSLog("[CursorFlow] Failed to create event tap")
             return
         }
         NSLog("[CursorFlow] Event tap created successfully")
 
-        // Create run loop source and add to current run loop
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
 
         if let runLoopSource = runLoopSource {
             CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
             CGEvent.tapEnable(tap: eventTap, enable: true)
-            NSLog("[CursorFlow] Mouse tracking started on main run loop")
+            NSLog("[CursorFlow] Event tap enabled on main run loop")
 
-            // Periodically check if the tap is still enabled and re-enable if needed
-            checkTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            // Periodically check if the tap is still enabled
+            checkTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
                 self?.checkAndReenableTap()
             }
+        }
+    }
+
+    private func startFallbackTracking() {
+        // NSEvent global monitor - works for mouse events when app is not focused
+        // This is more reliable than CGEvent tap for background operation
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+        ) { [weak self] event in
+            self?.handleMouseEvent(event)
+        }
+
+        // Local monitor for when our app is focused (global doesn't catch these)
+        localMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+        ) { [weak self] event in
+            self?.handleMouseEvent(event)
+            return event
+        }
+
+        // Polling fallback - catches mouse position even if events are missed
+        // Uses lower frequency to reduce CPU usage
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            let currentLocation = NSEvent.mouseLocation
+
+            // Convert from NSScreen coordinates (bottom-left origin) to Quartz (top-left origin)
+            if let screenHeight = NSScreen.screens.first?.frame.height {
+                let quartzY = screenHeight - currentLocation.y
+                let point = NSPoint(x: currentLocation.x, y: quartzY)
+
+                // Only fire if position changed significantly
+                let dx = abs(point.x - self.lastMouseLocation.x)
+                let dy = abs(point.y - self.lastMouseLocation.y)
+                if dx > 0.5 || dy > 0.5 {
+                    self.lastMouseLocation = point
+                    self.onMouseMove?(point)
+                }
+            }
+        }
+
+        NSLog("[CursorFlow] Fallback tracking started (global monitor + polling)")
+    }
+
+    private func handleMouseEvent(_ event: NSEvent) {
+        // NSEvent uses screen coordinates with origin at bottom-left
+        // Convert to Quartz coordinates (top-left origin) for consistency with CGEvent
+        let screenLocation = NSEvent.mouseLocation
+
+        if let screenHeight = NSScreen.screens.first?.frame.height {
+            let quartzY = screenHeight - screenLocation.y
+            let point = NSPoint(x: screenLocation.x, y: quartzY)
+            onMouseMove?(point)
         }
     }
 
@@ -100,21 +147,12 @@ class MouseTracker {
         }
     }
 
-    private func retryStartIfNeeded() {
-        if eventTap == nil && AXIsProcessTrusted() {
-            NSLog("[CursorFlow] Permission granted, starting mouse tracking")
-            start()
-        } else if !AXIsProcessTrusted() {
-            // Keep retrying until permission is granted
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.retryStartIfNeeded()
-            }
-        }
-    }
-
     func stop() {
         checkTimer?.invalidate()
         checkTimer = nil
+
+        pollingTimer?.invalidate()
+        pollingTimer = nil
 
         if let eventTap = eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
@@ -124,8 +162,18 @@ class MouseTracker {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         }
 
+        if let monitor = globalMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+
+        if let monitor = localMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+
         eventTap = nil
         runLoopSource = nil
+        globalMonitor = nil
+        localMonitor = nil
         NSLog("[CursorFlow] Mouse tracking stopped")
     }
 
@@ -134,9 +182,7 @@ class MouseTracker {
         let trusted = AXIsProcessTrustedWithOptions(options)
 
         if !trusted {
-            NSLog("[CursorFlow] Accessibility permission NOT granted - prompting user")
-        } else {
-            NSLog("[CursorFlow] Accessibility permission already granted")
+            NSLog("[CursorFlow] Accessibility permission NOT granted - using fallback only")
         }
     }
 
