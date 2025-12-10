@@ -27,7 +27,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         defaults.register(defaults: [
             "trailLength": 64,
             "trailDuration": 1.0,
-            "trailEffect": "smooth"
+            "trailEffect": "Smooth",
+            "trailColorRed": 1.0,
+            "trailColorGreen": 0.0,
+            "trailColorBlue": 0.0,
+            "trailColorName": "Red"
         ])
     }
 
@@ -52,6 +56,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let duration = defaults.double(forKey: "trailDuration")
         if duration > 0 {
             trailRenderer?.setFadeDuration(duration)
+        }
+
+        // Apply saved effect
+        if let effectName = defaults.string(forKey: "trailEffect"),
+           let effect = TrailEffect(rawValue: effectName) {
+            trailRenderer?.trailEffect = effect
+            NSLog("[CursorFlow] Loaded saved effect: %@", effectName)
+        }
+
+        // Apply saved color
+        let red = defaults.double(forKey: "trailColorRed")
+        let green = defaults.double(forKey: "trailColorGreen")
+        let blue = defaults.double(forKey: "trailColorBlue")
+        if red > 0 || green > 0 || blue > 0 {
+            let color = NSColor(red: CGFloat(red), green: CGFloat(green), blue: CGFloat(blue), alpha: 1.0)
+            trailRenderer?.trailColor = color
+            NSLog("[CursorFlow] Loaded saved color: R=%.2f G=%.2f B=%.2f", red, green, blue)
         }
 
         overlayWindow?.orderFrontRegardless()
@@ -81,6 +102,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Change trail color
         statusBarController?.onColorChange = { [weak self] color in
             self?.trailRenderer?.trailColor = color
+            // Save color to UserDefaults
+            let rgb = color.usingColorSpace(.sRGB) ?? color
+            UserDefaults.standard.set(Double(rgb.redComponent), forKey: "trailColorRed")
+            UserDefaults.standard.set(Double(rgb.greenComponent), forKey: "trailColorGreen")
+            UserDefaults.standard.set(Double(rgb.blueComponent), forKey: "trailColorBlue")
         }
 
         // Change trail effect

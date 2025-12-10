@@ -22,13 +22,27 @@ class StatusBarController: NSObject {
 
     // State
     private var isTrailEnabled = true
-    private var selectedColor: String = "Rainbow"
+    private var selectedColor: String = "Red"
     private var selectedEffect: TrailEffect = .smooth
 
     override init() {
         super.init()
+        loadSavedState()
         setupStatusItem()
         setupMenu()
+    }
+
+    private func loadSavedState() {
+        let defaults = UserDefaults.standard
+        // Load saved effect
+        if let effectName = defaults.string(forKey: "trailEffect"),
+           let effect = TrailEffect(rawValue: effectName) {
+            selectedEffect = effect
+        }
+        // Load saved color name
+        if let colorName = defaults.string(forKey: "trailColorName") {
+            selectedColor = colorName
+        }
     }
 
     private func setupStatusItem() {
@@ -85,6 +99,9 @@ class StatusBarController: NSObject {
             let item = NSMenuItem(title: title, action: #selector(selectColor(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = ["name": name, "color": color]
+            if name == selectedColor {
+                item.state = .on
+            }
             colorMenu.addItem(item)
         }
 
@@ -98,7 +115,7 @@ class StatusBarController: NSObject {
             let item = NSMenuItem(title: effect.rawValue, action: #selector(selectEffect(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = effect
-            if effect == .smooth {
+            if effect == selectedEffect {
                 item.state = .on
             }
             effectMenu.addItem(item)
@@ -163,6 +180,7 @@ class StatusBarController: NSObject {
            let name = info["name"] as? String,
            let color = info["color"] as? NSColor {
             selectedColor = name
+            UserDefaults.standard.set(name, forKey: "trailColorName")
 
             if name == "Custom" {
                 // Show color picker

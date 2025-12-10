@@ -51,16 +51,17 @@ class OverlayWindow: NSWindow {
             return
         }
 
-        let metalView = MTKView(frame: contentView?.bounds ?? .zero, device: device)
+        // Use the window's content rect for the frame
+        let viewFrame = contentRect(forFrameRect: frame)
+        let metalView = MTKView(frame: NSRect(origin: .zero, size: viewFrame.size), device: device)
         metalView.autoresizingMask = [.width, .height]
+
+        // MUST set wantsLayer BEFORE accessing layer properties
+        metalView.wantsLayer = true
 
         // Critical for transparent overlay
         metalView.layer?.isOpaque = false
-        metalView.wantsLayer = true
-        if let layer = metalView.layer {
-            layer.isOpaque = false
-            layer.backgroundColor = CGColor.clear
-        }
+        metalView.layer?.backgroundColor = CGColor.clear
 
         metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         metalView.framebufferOnly = false

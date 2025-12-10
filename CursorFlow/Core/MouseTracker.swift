@@ -4,24 +4,33 @@ import CoreGraphics
 class MouseTracker {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var checkTimer: Timer?
 
     var onMouseMove: ((NSPoint) -> Void)?
 
     func start() {
-        // Event mask for mouse moved and dragged events
+        // Event mask for all mouse movement events including clicks
         let eventMask: CGEventMask = (1 << CGEventType.mouseMoved.rawValue) |
                                       (1 << CGEventType.leftMouseDragged.rawValue) |
                                       (1 << CGEventType.rightMouseDragged.rawValue) |
-                                      (1 << CGEventType.otherMouseDragged.rawValue)
+                                      (1 << CGEventType.otherMouseDragged.rawValue) |
+                                      (1 << CGEventType.leftMouseDown.rawValue) |
+                                      (1 << CGEventType.leftMouseUp.rawValue)
 
-        // Create event tap
+        // Create event tap at session level (more reliable across app switches)
         eventTap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
+            tap: .cgSessionEventTap,  // Session level tap - survives app focus changes
             place: .headInsertEventTap,
-            options: .listenOnly,  // We only listen, don't modify events
+            options: .listenOnly,
             eventsOfInterest: eventMask,
             callback: { proxy, type, event, refcon in
                 guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
+
+                // Handle tap disabled event
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    NSLog("[CursorFlow] Event tap disabled, will re-enable")
+                    return Unmanaged.passUnretained(event)
+                }
 
                 let tracker = Unmanaged<MouseTracker>.fromOpaque(refcon).takeUnretainedValue()
                 let location = event.location
@@ -47,24 +56,41 @@ class MouseTracker {
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
 
         if let runLoopSource = runLoopSource {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+            CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
             CGEvent.tapEnable(tap: eventTap, enable: true)
-            print("Mouse tracking started")
+            NSLog("[CursorFlow] Mouse tracking started on main run loop")
+
+            // Periodically check if the tap is still enabled and re-enable if needed
+            checkTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.checkAndReenableTap()
+            }
+        }
+    }
+
+    private func checkAndReenableTap() {
+        guard let eventTap = eventTap else { return }
+
+        if !CGEvent.tapIsEnabled(tap: eventTap) {
+            NSLog("[CursorFlow] Event tap was disabled, re-enabling...")
+            CGEvent.tapEnable(tap: eventTap, enable: true)
         }
     }
 
     func stop() {
+        checkTimer?.invalidate()
+        checkTimer = nil
+
         if let eventTap = eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
         }
 
         if let runLoopSource = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         }
 
         eventTap = nil
         runLoopSource = nil
-        print("Mouse tracking stopped")
+        NSLog("[CursorFlow] Mouse tracking stopped")
     }
 
     private func requestAccessibilityPermission() {
