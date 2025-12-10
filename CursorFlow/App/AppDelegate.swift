@@ -9,14 +9,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("[CursorFlow] App launched")
+        checkAccessibilityPermission()
         loadSettings()
-        NSLog("[CursorFlow] Settings loaded")
         setupOverlayWindow()
-        NSLog("[CursorFlow] Overlay window setup complete")
         setupMouseTracking()
-        NSLog("[CursorFlow] Mouse tracking setup complete")
         setupStatusBar()
-        NSLog("[CursorFlow] Status bar setup complete - should be visible now")
+        NSLog("[CursorFlow] Setup complete")
+    }
+
+    private func checkAccessibilityPermission() {
+        if !AXIsProcessTrusted() {
+            NSLog("[CursorFlow] Accessibility permission not granted, showing prompt")
+            let alert = NSAlert()
+            alert.messageText = "Accessibility Permission Required"
+            alert.informativeText = "CursorFlow needs Accessibility permission to track your cursor across all apps.\n\nPlease enable it in System Settings > Privacy & Security > Accessibility, then restart the app."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Open Settings")
+            alert.addButton(withTitle: "Later")
+
+            if alert.runModal() == .alertFirstButtonReturn {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        }
     }
 
     private func loadSettings() {
@@ -62,7 +78,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let effectName = defaults.string(forKey: "trailEffect"),
            let effect = TrailEffect(rawValue: effectName) {
             trailRenderer?.trailEffect = effect
-            NSLog("[CursorFlow] Loaded saved effect: %@", effectName)
         }
 
         // Apply saved color
@@ -72,7 +87,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if red > 0 || green > 0 || blue > 0 {
             let color = NSColor(red: CGFloat(red), green: CGFloat(green), blue: CGFloat(blue), alpha: 1.0)
             trailRenderer?.trailColor = color
-            NSLog("[CursorFlow] Loaded saved color: R=%.2f G=%.2f B=%.2f", red, green, blue)
         }
 
         overlayWindow?.orderFrontRegardless()

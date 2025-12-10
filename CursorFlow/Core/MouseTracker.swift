@@ -9,30 +9,44 @@ class MouseTracker {
     var onMouseMove: ((NSPoint) -> Void)?
 
     func start() {
-        // Event mask for all mouse movement events including clicks
+        // First check accessibility permission
+        if !AXIsProcessTrusted() {
+            NSLog("[CursorFlow] Accessibility not granted, requesting permission...")
+            requestAccessibilityPermission()
+
+            // Retry periodically until permission is granted
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.retryStartIfNeeded()
+            }
+            return
+        }
+
+        // Event mask - only mouse movement events (simpler, more reliable)
         let eventMask: CGEventMask = (1 << CGEventType.mouseMoved.rawValue) |
                                       (1 << CGEventType.leftMouseDragged.rawValue) |
                                       (1 << CGEventType.rightMouseDragged.rawValue) |
-                                      (1 << CGEventType.otherMouseDragged.rawValue) |
-                                      (1 << CGEventType.leftMouseDown.rawValue) |
-                                      (1 << CGEventType.leftMouseUp.rawValue)
+                                      (1 << CGEventType.otherMouseDragged.rawValue)
 
-        // Create event tap at session level (more reliable across app switches)
+        // Create event tap at HID level for global access (works even when not focused)
         eventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,  // Session level tap - survives app focus changes
+            tap: .cghidEventTap,  // HID level tap - global, works across all apps
             place: .headInsertEventTap,
             options: .listenOnly,
             eventsOfInterest: eventMask,
             callback: { proxy, type, event, refcon in
                 guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
 
-                // Handle tap disabled event
+                let tracker = Unmanaged<MouseTracker>.fromOpaque(refcon).takeUnretainedValue()
+
+                // Handle tap disabled event - immediately re-enable
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    NSLog("[CursorFlow] Event tap disabled, will re-enable")
+                    NSLog("[CursorFlow] Event tap disabled by system, re-enabling immediately")
+                    if let tap = tracker.eventTap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
                     return Unmanaged.passUnretained(event)
                 }
 
-                let tracker = Unmanaged<MouseTracker>.fromOpaque(refcon).takeUnretainedValue()
                 let location = event.location
 
                 // CGEvent location uses Quartz display coordinates (origin at top-left)
@@ -61,7 +75,7 @@ class MouseTracker {
             NSLog("[CursorFlow] Mouse tracking started on main run loop")
 
             // Periodically check if the tap is still enabled and re-enable if needed
-            checkTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            checkTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                 self?.checkAndReenableTap()
             }
         }
@@ -73,6 +87,18 @@ class MouseTracker {
         if !CGEvent.tapIsEnabled(tap: eventTap) {
             NSLog("[CursorFlow] Event tap was disabled, re-enabling...")
             CGEvent.tapEnable(tap: eventTap, enable: true)
+        }
+    }
+
+    private func retryStartIfNeeded() {
+        if eventTap == nil && AXIsProcessTrusted() {
+            NSLog("[CursorFlow] Permission granted, starting mouse tracking")
+            start()
+        } else if !AXIsProcessTrusted() {
+            // Keep retrying until permission is granted
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.retryStartIfNeeded()
+            }
         }
     }
 
