@@ -56,9 +56,12 @@ class MouseTracker {
 
                 let location = event.location
 
-                // CGEvent location uses Quartz display coordinates (origin at top-left)
+                // CGEvent location uses Quartz display coordinates (origin at top-left of primary display)
+                // Keep Y as-is since Metal shader also uses top-down coordinate system
                 DispatchQueue.main.async {
-                    tracker.onMouseMove?(NSPoint(x: location.x, y: location.y))
+                    // Pass CGEvent coordinates directly - shader handles the coordinate transform
+                    let nsPoint = NSPoint(x: location.x, y: location.y)
+                    tracker.onMouseMove?(nsPoint)
                 }
 
                 return Unmanaged.passUnretained(event)

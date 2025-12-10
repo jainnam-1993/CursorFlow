@@ -4,11 +4,14 @@ import MetalKit
 class OverlayWindow: NSWindow {
 
     init() {
-        // Use the main screen frame - CGEvent coordinates are relative to main display
-        let screenFrame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        // Calculate the union of all screens to cover entire display area
+        var screenFrame = NSScreen.screens.first?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        for screen in NSScreen.screens {
+            screenFrame = screenFrame.union(screen.frame)
+        }
 
-        NSLog("[CursorFlow] Creating overlay window with frame: %.0f,%.0f %.0fx%.0f",
-              screenFrame.origin.x, screenFrame.origin.y, screenFrame.width, screenFrame.height)
+        NSLog("[CursorFlow] Creating overlay window with frame: %.0f,%.0f %.0fx%.0f (screens: %d)",
+              screenFrame.origin.x, screenFrame.origin.y, screenFrame.width, screenFrame.height, NSScreen.screens.count)
 
         super.init(
             contentRect: screenFrame,

@@ -29,6 +29,7 @@ class TrailRenderer: NSObject, MTKViewDelegate {
 
     // Screen info
     private var screenSize: CGSize = .zero
+    private var drawableScale: CGFloat = 1.0  // Ratio of drawable to screen size
     private var hueOffset: Float = 0
     private var time: Float = 0
 
@@ -52,12 +53,14 @@ class TrailRenderer: NSObject, MTKViewDelegate {
         setupPipeline()
         setupBuffers()
 
-        // Get screen size - IMPORTANT: must match CGEvent coordinate space
-        if let screen = NSScreen.main {
-            screenSize = screen.frame.size
-            uniforms.screenSize = SIMD2<Float>(Float(screenSize.width), Float(screenSize.height))
-            NSLog("[CursorFlow] TrailRenderer init - screen size: %.0fx%.0f", screenSize.width, screenSize.height)
-        }
+        // Get combined screen size - must match overlay window and CGEvent coordinate space
+        updateScreenSize()
+
+        // Initialize uniforms with screen size (drawable callback may not fire before first draw)
+        // For now use screen size; drawableSizeWillChange will correct if different
+        uniforms.screenSize = SIMD2<Float>(Float(screenSize.width), Float(screenSize.height))
+
+        NSLog("[CursorFlow] TrailRenderer init - combined screen size: %.0fx%.0f", screenSize.width, screenSize.height)
     }
 
     private func setupPipeline() {
@@ -144,13 +147,17 @@ class TrailRenderer: NSObject, MTKViewDelegate {
 
         pointCount += 1
         if pointCount % 100 == 1 {
-            NSLog("[CursorFlow] addPoint called #%d at (%.0f, %.0f)", pointCount, point.x, point.y)
+            NSLog("[CursorFlow] addPoint called #%d at (%.0f, %.0f) scale: %.2f", pointCount, point.x, point.y, drawableScale)
         }
+
+        // Scale mouse coordinates (in points) to drawable coordinates (in pixels)
+        let scaledX = Float(point.x * drawableScale)
+        let scaledY = Float(point.y * drawableScale)
 
         let color = calculateColor(for: trailPoints.count)
         let newPoint = TrailPoint(
-            x: Float(point.x),
-            y: Float(point.y),
+            x: scaledX,
+            y: scaledY,
             color: color,
             alpha: 1.0
         )
@@ -242,13 +249,13 @@ class TrailRenderer: NSObject, MTKViewDelegate {
     }
 
     private func generateLightningVertices() -> [TrailVertex] {
-        // Skip first few points to keep area near cursor clear
-        let skipPoints = 3
-        guard trailPoints.count >= skipPoints + 2 else { return [] }
+        // Start flames a bit behind the cursor tail
+        let skipPoints = 4
+        guard trailPoints.count >= skipPoints + 3 else { return [] }
 
         let userColor = nsColorToSimd(trailColor)
 
-        // Only flame wisps - no base line
+        // Flame wisps trailing behind cursor
         return buildFlameWisps(startIndex: skipPoints, userColor: userColor)
     }
 
@@ -286,42 +293,46 @@ class TrailRenderer: NSObject, MTKViewDelegate {
         return vertices
     }
 
-    /// Build flame wisps rising from the trail
+    /// Build flame wisps trailing behind cursor movement
     private func buildFlameWisps(startIndex: Int, userColor: SIMD3<Float>) -> [TrailVertex] {
         var vertices: [TrailVertex] = []
 
-        // Create wisps at intervals along the trail
-        let wispSpacing = 3
+        // Create wisps at intervals along the trail (trail points are behind cursor)
+        let wispSpacing = 2
         for i in stride(from: startIndex, to: trailPoints.count - 2, by: wispSpacing) {
             let basePos = trailPoints[i].position
             let t = Float(i - startIndex) / Float(max(1, trailPoints.count - startIndex - 1))
 
-            // Wisps rise upward (negative Y in screen coords)
-            let wispHeight: Float = 15.0 * (1.0 - t)  // Taller near cursor
-            let wispWidth: Float = 3.0 * (1.0 - t * 0.5)
+            // Calculate direction from this point toward the cursor (opposite of trail direction)
+            // This makes wisps rise "up" relative to movement direction
+            let perpendicular = calculatePerpendicular(at: i)
 
-            // Animated horizontal sway
-            let sway = sin(time * 20 + Float(i) * 0.8) * 4.0 * (1.0 - t)
+            // Wisp parameters - fade along trail
+            let wispHeight: Float = 12.0 * (1.0 - t * 0.7)
+            let wispWidth: Float = 2.5 * (1.0 - t * 0.5)
 
-            // Wisp base (at trail)
-            let baseAlpha = 0.8 * trailPoints[i].alpha * (1.0 - t)
-            let baseColor = SIMD4<Float>(1.0, 0.6, 0.2, baseAlpha)  // Orange
+            // Animated sway perpendicular to movement
+            let sway = sin(time * 25 + Float(i) * 0.6) * 3.0 * (1.0 - t)
 
-            // Wisp tip (rising up)
-            let tipPos = SIMD2<Float>(basePos.x + sway, basePos.y - wispHeight)
-            let tipAlpha = 0.3 * trailPoints[i].alpha * (1.0 - t)
-            let tipColor = SIMD4<Float>(1.0, 0.9, 0.5, tipAlpha)  // Yellow-white
+            // Wisp base (at trail position) - reddish-orange flame core
+            let baseAlpha = 0.9 * trailPoints[i].alpha * (1.0 - t * 0.5)
+            let baseColor = SIMD4<Float>(1.0, 0.4, 0.1, baseAlpha)  // Reddish-orange
 
-            // Build wisp as thin triangle strip
-            let perpendicular = SIMD2<Float>(1, 0)  // Horizontal spread
+            // Wisp tip rises perpendicular to trail (like flames rising from a moving torch)
+            let tipPos = basePos + perpendicular * (wispHeight + sway)
+            let tipAlpha = 0.25 * trailPoints[i].alpha * (1.0 - t)
+            let tipColor = SIMD4<Float>(1.0, 0.8, 0.3, tipAlpha)  // Orange-yellow tip
 
-            // Base vertices
-            vertices.append(TrailVertex(position: basePos + perpendicular * wispWidth, color: baseColor))
-            vertices.append(TrailVertex(position: basePos - perpendicular * wispWidth, color: baseColor))
+            // Get tangent direction for width spread
+            let tangent = SIMD2<Float>(-perpendicular.y, perpendicular.x)
 
-            // Tip vertices (narrower)
-            vertices.append(TrailVertex(position: tipPos + perpendicular * (wispWidth * 0.3), color: tipColor))
-            vertices.append(TrailVertex(position: tipPos - perpendicular * (wispWidth * 0.3), color: tipColor))
+            // Base vertices (wider)
+            vertices.append(TrailVertex(position: basePos + tangent * wispWidth, color: baseColor))
+            vertices.append(TrailVertex(position: basePos - tangent * wispWidth, color: baseColor))
+
+            // Tip vertices (narrower, tapered)
+            vertices.append(TrailVertex(position: tipPos + tangent * (wispWidth * 0.2), color: tipColor))
+            vertices.append(TrailVertex(position: tipPos - tangent * (wispWidth * 0.2), color: tipColor))
         }
 
         return vertices
@@ -539,13 +550,28 @@ class TrailRenderer: NSObject, MTKViewDelegate {
     // MARK: - MTKViewDelegate
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        // Use actual screen size, not drawable size (to match mouse coordinates)
-        if let screen = NSScreen.main {
-            screenSize = screen.frame.size
-            uniforms.screenSize = SIMD2<Float>(Float(screenSize.width), Float(screenSize.height))
-            NSLog("[CursorFlow] Screen size set to: %.0f x %.0f (drawable: %.0f x %.0f)",
-                  screenSize.width, screenSize.height, size.width, size.height)
+        // Screen size in points (for mouse coordinates)
+        updateScreenSize()
+
+        // Calculate scale between drawable (pixels) and screen (points)
+        if screenSize.width > 0 {
+            drawableScale = size.width / screenSize.width
         }
+
+        // Shader uses drawable size
+        uniforms.screenSize = SIMD2<Float>(Float(size.width), Float(size.height))
+
+        NSLog("[CursorFlow] Drawable: %.0f x %.0f, Screen: %.0f x %.0f, Scale: %.2f",
+              size.width, size.height, screenSize.width, screenSize.height, drawableScale)
+    }
+
+    /// Calculate combined screen frame that matches overlay window
+    private func updateScreenSize() {
+        var combinedFrame = NSScreen.screens.first?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        for screen in NSScreen.screens {
+            combinedFrame = combinedFrame.union(screen.frame)
+        }
+        screenSize = combinedFrame.size
     }
 
     private var drawCount = 0
